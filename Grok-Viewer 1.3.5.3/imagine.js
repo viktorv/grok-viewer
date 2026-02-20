@@ -126,6 +126,153 @@
 
   window.addEventListener("message", onMessage);
 
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const collectRoots = () => {
+    const roots = [document];
+    const seen = new Set([document]);
+    const queue = [document.documentElement];
+    while (queue.length) {
+      const current = queue.shift();
+      if (!current || !(current instanceof Element)) continue;
+      if (current.shadowRoot && !seen.has(current.shadowRoot)) {
+        seen.add(current.shadowRoot);
+        roots.push(current.shadowRoot);
+        const nested = current.shadowRoot.querySelectorAll("*");
+        for (let i = 0; i < nested.length; i += 1) queue.push(nested[i]);
+      }
+      const children = current.children || [];
+      for (let i = 0; i < children.length; i += 1) queue.push(children[i]);
+    }
+    return roots;
+  };
+
+  const queryAllDeep = (selector) => {
+    const roots = collectRoots();
+    const out = [];
+    const seen = new Set();
+    for (let i = 0; i < roots.length; i += 1) {
+      let nodes = [];
+      try {
+        nodes = Array.from(roots[i].querySelectorAll(selector));
+      } catch (error) {
+        nodes = [];
+      }
+      for (let j = 0; j < nodes.length; j += 1) {
+        const node = nodes[j];
+        if (!node || seen.has(node)) continue;
+        seen.add(node);
+        out.push(node);
+      }
+    }
+    return out;
+  };
+
+  const isVisible = (node) => {
+    if (!node || !(node instanceof Element)) return false;
+    const style = window.getComputedStyle(node);
+    if (!style) return false;
+    if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity || 1) === 0) return false;
+    const rect = node.getBoundingClientRect();
+    return Boolean(rect && rect.width > 0 && rect.height > 0);
+  };
+
+  const dataUrlToBlob = async (dataUrl) => {
+    const response = await fetch(dataUrl);
+    return response.blob();
+  };
+
+  const setPromptValue = (promptText) => {
+    const promptSelectors = [
+      'textarea[data-testid*="prompt" i]',
+      'textarea[aria-label*="prompt" i]',
+      'textarea[placeholder*="prompt" i]',
+      'textarea',
+      '[contenteditable="true"][role="textbox"]'
+    ];
+    let promptEl = null;
+    for (let i = 0; i < promptSelectors.length; i += 1) {
+      const candidate = queryAllDeep(promptSelectors[i]).find((node) => isVisible(node) && !node.disabled);
+      if (candidate) {
+        promptEl = candidate;
+        break;
+      }
+    }
+    if (!promptEl) return false;
+    const nextValue = String(promptText || "");
+    if (promptEl.tagName === "TEXTAREA" || promptEl.tagName === "INPUT") {
+      promptEl.focus();
+      promptEl.value = nextValue;
+      promptEl.dispatchEvent(new Event("input", { bubbles: true }));
+      promptEl.dispatchEvent(new Event("change", { bubbles: true }));
+      return true;
+    }
+    promptEl.focus();
+    promptEl.textContent = nextValue;
+    promptEl.dispatchEvent(new InputEvent("input", { bubbles: true, data: nextValue }));
+    return true;
+  };
+
+  const clickGenerateButton = () => {
+    const labels = [/^generate$/i, /^create$/i, /generate video/i, /create video/i];
+    const buttons = queryAllDeep('button,[role="button"]');
+    const candidate = buttons.find((button) => {
+      if (!isVisible(button)) return false;
+      if (button.disabled || String(button.getAttribute("aria-disabled") || "").toLowerCase() === "true") return false;
+      const text = String(button.textContent || "").trim();
+      return labels.some((rx) => rx.test(text));
+    });
+    if (!candidate) return false;
+    candidate.click();
+    return true;
+  };
+
+  const uploadSeedImage = async (payload) => {
+    const input = queryAllDeep('input[type="file"]').find((node) => {
+      if (!(node instanceof HTMLInputElement)) return false;
+      const accepts = String(node.accept || "").toLowerCase();
+      return accepts.includes("image") || accepts === "";
+    });
+    if (!input) {
+      throw new Error("image-upload-input-not-found");
+    }
+    const blob = await dataUrlToBlob(payload.imageDataUrl);
+    const file = new File([blob], payload.filename || `sequence-seed-${Date.now()}.jpg`, {
+      type: payload.mimeType || blob.type || "image/jpeg"
+    });
+    const transfer = new DataTransfer();
+    transfer.items.add(file);
+    input.files = transfer.files;
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    input.dispatchEvent(new Event("change", { bubbles: true }));
+  };
+
+  const handleSequenceGenerate = async (payload) => {
+    if (!payload || !payload.imageDataUrl) {
+      return { ok: false, error: "missing-image-data" };
+    }
+    if (!/\/imagine(?:[/?#]|$)/i.test(window.location.pathname)) {
+      return { ok: false, error: "not-imagine-page" };
+    }
+    await uploadSeedImage(payload);
+    await sleep(220);
+    setPromptValue(payload.promptText || "");
+    await sleep(160);
+    const clicked = clickGenerateButton();
+    if (!clicked) return { ok: false, error: "generate-button-not-found" };
+    return { ok: true };
+  };
+
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (!message || message.action !== "grokViewerSequenceGenerateFromImage") return false;
+    handleSequenceGenerate(message.payload)
+      .then((result) => sendResponse(result || { ok: false, error: "sequence-empty-result" }))
+      .catch((error) => {
+        sendResponse({ ok: false, error: String((error && error.message) || error || "sequence-failed") });
+      });
+    return true;
+  });
+
   const injectScript = () => {
     if (document.getElementById("grok-viewer-hook")) return;
     const script = document.createElement("script");
