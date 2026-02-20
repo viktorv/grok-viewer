@@ -1754,6 +1754,206 @@
 
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+  const extractLastFrame = async (videoUrl, options = {}) => {
+    const timeoutMs = Math.max(4000, Number(options.timeoutMs) || 25000);
+    const fetchController = new AbortController();
+    let timer = null;
+    let objectUrl = "";
+    const video = document.createElement("video");
+    video.muted = true;
+    video.playsInline = true;
+    video.preload = "auto";
+
+    const cleanUp = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      try {
+        video.pause();
+      } catch (error) {}
+      video.removeAttribute("src");
+      video.load();
+      if (objectUrl) {
+        URL.revokeObjectURL(objectUrl);
+        objectUrl = "";
+      }
+    };
+
+    const waitForEvent = (eventName, timeoutLabel) =>
+      new Promise((resolve, reject) => {
+        let done = false;
+        const onEvent = () => {
+          if (done) return;
+          done = true;
+          video.removeEventListener(eventName, onEvent);
+          video.removeEventListener("error", onError);
+          resolve();
+        };
+        const onError = () => {
+          if (done) return;
+          done = true;
+          video.removeEventListener(eventName, onEvent);
+          video.removeEventListener("error", onError);
+          reject(new Error(timeoutLabel || `video-${eventName}-failed`));
+        };
+        video.addEventListener(eventName, onEvent, { once: true });
+        video.addEventListener("error", onError, { once: true });
+      });
+
+    try {
+      timer = setTimeout(() => {
+        fetchController.abort();
+      }, timeoutMs);
+      const response = await fetch(videoUrl, { credentials: "include", signal: fetchController.signal });
+      if (!response.ok) throw new Error(`frame-fetch-http-${response.status}`);
+      const sourceBlob = await response.blob();
+      objectUrl = URL.createObjectURL(sourceBlob);
+      video.src = objectUrl;
+      await waitForEvent("loadedmetadata", "video-metadata-timeout");
+      const duration = Number(video.duration) || 0;
+      const seekCandidates = [0.05, 0.2, 0.5].map((epsilon) => Math.max(0, duration - epsilon));
+      let seekSucceeded = false;
+      for (let i = 0; i < seekCandidates.length; i += 1) {
+        const seekTo = seekCandidates[i];
+        try {
+          if (Math.abs(Number(video.currentTime) - seekTo) < 0.001) {
+            seekSucceeded = true;
+            break;
+          }
+          video.currentTime = seekTo;
+          await waitForEvent("seeked", "video-seek-timeout");
+          seekSucceeded = true;
+          break;
+        } catch (error) {
+          // fallback to earlier position near the end
+        }
+      }
+      if (!seekSucceeded) throw new Error("video-seek-failed");
+      const width = Math.max(1, Number(video.videoWidth) || 1);
+      const height = Math.max(1, Number(video.videoHeight) || 1);
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d", { alpha: false });
+      if (!ctx) throw new Error("canvas-context-missing");
+      ctx.drawImage(video, 0, 0, width, height);
+      const frameBlob = await new Promise((resolve, reject) => {
+        canvas.toBlob(
+          (blob) => {
+            if (blob) resolve(blob);
+            else reject(new Error("frame-to-blob-failed"));
+          },
+          "image/jpeg",
+          0.92
+        );
+      });
+      return frameBlob;
+    } finally {
+      cleanUp();
+    }
+  };
+
+  const closeSequenceModal = () => {
+    if (!sequenceModal) return;
+    sequenceModal.classList.remove("open");
+    sequenceModal.setAttribute("aria-hidden", "true");
+    if (sequencePromptInput) sequencePromptInput.value = "";
+    if (sequencePreviewImage) sequencePreviewImage.removeAttribute("src");
+    if (sequencePreviewUrl) {
+      URL.revokeObjectURL(sequencePreviewUrl);
+      sequencePreviewUrl = "";
+    }
+    sequenceImageBlob = null;
+    if (sequenceGenerateBtn) sequenceGenerateBtn.disabled = false;
+  };
+
+  const openSequenceModal = () => {
+    if (!sequenceModal || !sequenceImageBlob) return;
+    if (sequencePreviewUrl) URL.revokeObjectURL(sequencePreviewUrl);
+    sequencePreviewUrl = URL.createObjectURL(sequenceImageBlob);
+    if (sequencePreviewImage) sequencePreviewImage.src = sequencePreviewUrl;
+    if (sequencePromptInput) sequencePromptInput.value = "";
+    sequenceModal.classList.add("open");
+    sequenceModal.setAttribute("aria-hidden", "false");
+    if (sequencePromptInput && typeof sequencePromptInput.focus === "function") {
+      setTimeout(() => sequencePromptInput.focus(), 0);
+    }
+  };
+
+  const getCurrentLightboxVideoUrl = () => {
+    const selected = state.items[state.selectedIndex];
+    const active = resolveActiveItem(selected);
+    if (!active) return "";
+    const candidates = getPlaybackCandidates(active);
+    const playable = (candidates || []).find((candidate) => isMp4(candidate, active.mimeType));
+    return playable || "";
+  };
+
+  const startSequenceFromCurrentVideo = async () => {
+    if (!lightboxEl || !lightboxEl.classList.contains("open")) return;
+    const sourceUrl = getCurrentLightboxVideoUrl();
+    if (!sourceUrl) {
+      showToast("No video source found.", "error");
+      return;
+    }
+    if (sequenceVideoBtn) sequenceVideoBtn.disabled = true;
+    setStatus("Extracting last frame...");
+    try {
+      const frameBlob = await extractLastFrame(sourceUrl, { timeoutMs: 25000 });
+      sequenceImageBlob = frameBlob;
+      openSequenceModal();
+      setReadyStatus();
+    } catch (error) {
+      setStatus("Frame extraction failed.");
+      showToast("Could not extract last frame.", "error");
+    } finally {
+      if (sequenceVideoBtn) sequenceVideoBtn.disabled = false;
+    }
+  };
+
+  const submitSequenceGeneration = async () => {
+    if (!sequenceImageBlob) {
+      showToast("Sequence image missing.", "error");
+      return;
+    }
+    if (sequenceGenerateBtn) sequenceGenerateBtn.disabled = true;
+    const promptText = sequencePromptInput ? String(sequencePromptInput.value || "") : "";
+    try {
+      const dataUrl = await blobToDataUrl(sequenceImageBlob);
+      const filename = `sequence-seed-${Date.now()}.jpg`;
+      const result = await new Promise((resolve) => {
+        chrome.runtime.sendMessage(
+          {
+            action: "grokViewerSequenceGenerate",
+            payload: {
+              imageDataUrl: dataUrl,
+              filename,
+              mimeType: sequenceImageBlob.type || "image/jpeg",
+              promptText
+            }
+          },
+          (response) => {
+            if (chrome.runtime.lastError) {
+              resolve({ ok: false, error: chrome.runtime.lastError.message || "sequence-runtime-error" });
+              return;
+            }
+            resolve(response || { ok: false, error: "sequence-no-response" });
+          }
+        );
+      });
+      if (!result || !result.ok) {
+        throw new Error((result && result.error) || "sequence-generate-failed");
+      }
+      closeSequenceModal();
+      setStatus("Generating next video...");
+      showToast("Generating next video...");
+    } catch (error) {
+      showToast(`Sequence failed: ${String((error && error.message) || error || "unknown")}`, "error");
+      if (sequenceGenerateBtn) sequenceGenerateBtn.disabled = false;
+    }
+  };
+
   const deletePostDirect = async (postId) => {
     if (!postId) return { ok: false };
     const response = await fetch(DELETE_URL, {
@@ -3339,6 +3539,14 @@
   let promptChoiceAskResolver = null;
   let promptChoiceTimer = null;
   let promptChoiceModalPreviousFocus = null;
+  let sequenceModal;
+  let sequenceClose;
+  let sequencePreviewImage;
+  let sequencePromptInput;
+  let sequenceCancelBtn;
+  let sequenceGenerateBtn;
+  let sequencePreviewUrl = "";
+  let sequenceImageBlob = null;
   let lightboxPromptNoticeTimer = null;
   const thumbPromptNoticeTimers = new WeakMap();
   let nestedGuideModal;
@@ -3386,6 +3594,7 @@
   let deleteBtn;
   let promptBtn;
   let regenBtn;
+  let sequenceVideoBtn;
   let autoNextBtn;
   let downloadGroupBtn;
   let autoAllBtn;
@@ -5900,6 +6109,12 @@
     if (shareBtn) shareBtn.disabled = !activeItem || !activeItem.postId || state.busy;
     if (deleteBtn) deleteBtn.disabled = !canDelete || state.busy;
     if (promptBtn) promptBtn.disabled = !activeItem || state.busy;
+    if (sequenceVideoBtn) {
+      const isVideoActive = Boolean(activeItem && isMp4(activeItem.url || activeItem.playbackUrl || "", activeItem.mimeType));
+      sequenceVideoBtn.style.display = isImages ? "none" : "inline-flex";
+      sequenceVideoBtn.disabled = !isVideoActive || state.busy;
+      sequenceVideoBtn.dataset.tooltip = "Use last frame as next seed";
+    }
     if (regenBtn) {
       const canRegenerate = Boolean(regenContext && regenContext.message && regenContext.parentPostId);
       const slotBlocked = !activeRunning && runningCount >= REGEN_MAX_CONCURRENT;
@@ -6984,6 +7199,7 @@
     lightboxEl.setAttribute("aria-hidden", "true");
     closeNestedGuideModal();
     closeNormalGuideModal();
+    closeSequenceModal();
     if (clearPlayerLoadHooks) {
       try {
         clearPlayerLoadHooks();
@@ -7134,6 +7350,7 @@ const initHideModToastTooltip = () => {};
     deleteBtn = shadow.querySelector("#deleteBtn");
     promptBtn = shadow.querySelector("#promptBtn");
     regenBtn = shadow.querySelector("#regenBtn");
+    sequenceVideoBtn = shadow.querySelector("#sequenceVideoBtn");
     autoNextBtn = shadow.querySelector("#autoNextBtn");
     downloadGroupBtn = shadow.querySelector("#downloadGroupBtn");
     autoAllBtn = shadow.querySelector("#autoAllBtn");
@@ -7194,6 +7411,12 @@ const initHideModToastTooltip = () => {};
     duplicateYesBtn = shadow.querySelector("#duplicateYesBtn");
     duplicateNoBtn = shadow.querySelector("#duplicateNoBtn");
     promptChoiceModal = shadow.querySelector("#promptChoiceModal");
+    sequenceModal = shadow.querySelector("#sequenceModal");
+    sequenceClose = shadow.querySelector("#sequenceClose");
+    sequencePreviewImage = shadow.querySelector("#sequencePreviewImage");
+    sequencePromptInput = shadow.querySelector("#sequencePromptInput");
+    sequenceCancelBtn = shadow.querySelector("#sequenceCancelBtn");
+    sequenceGenerateBtn = shadow.querySelector("#sequenceGenerateBtn");
     promptChoiceClose = shadow.querySelector("#promptChoiceClose");
     promptChoiceCopyBtn = shadow.querySelector("#promptChoiceCopyBtn");
     promptChoiceDownloadBtn = shadow.querySelector("#promptChoiceDownloadBtn");
@@ -7416,6 +7639,11 @@ const initHideModToastTooltip = () => {};
       regenBtn.onclick = () => {
         startRegeneration();
       };
+    if (sequenceVideoBtn) {
+      sequenceVideoBtn.onclick = () => {
+        startSequenceFromCurrentVideo();
+      };
+    }
     if (regenStopBtn)
       regenStopBtn.onclick = () => {
         stopRegeneration("Stop pressed");
@@ -7491,6 +7719,14 @@ const initHideModToastTooltip = () => {};
     if (promptChoiceModal) {
       promptChoiceModal.addEventListener("click", (event) => {
         if (event.target === promptChoiceModal) closePromptChoiceModal(null);
+      });
+    }
+    if (sequenceClose) sequenceClose.onclick = () => closeSequenceModal();
+    if (sequenceCancelBtn) sequenceCancelBtn.onclick = () => closeSequenceModal();
+    if (sequenceGenerateBtn) sequenceGenerateBtn.onclick = () => submitSequenceGeneration();
+    if (sequenceModal) {
+      sequenceModal.addEventListener("click", (event) => {
+        if (event.target === sequenceModal) closeSequenceModal();
       });
     }
     if (nestedGuideOkBtn) {
@@ -7688,6 +7924,13 @@ const initHideModToastTooltip = () => {};
         if (event.key === "Escape") {
           event.preventDefault();
           closePromptChoiceModal(null);
+        }
+        return;
+      }
+      if (sequenceModal && sequenceModal.classList.contains("open")) {
+        if (event.key === "Escape") {
+          event.preventDefault();
+          closeSequenceModal();
         }
         return;
       }

@@ -1,5 +1,6 @@
 (() => {
   const SETTINGS_KEY = "grokViewerSettings";
+  const IMAGINE_URL = "https://grok.com/imagine";
 
   const sanitizeFolderPath = (value) => {
     if (!value) return "";
@@ -30,6 +31,68 @@
     if (ua.includes("brave")) urls.push("brave://settings/downloads");
     urls.push("chrome://settings/downloads");
     return urls;
+  };
+
+  const tabsQuery = (queryInfo) =>
+    new Promise((resolve) => {
+      chrome.tabs.query(queryInfo, (tabs) => {
+        if (chrome.runtime.lastError) {
+          resolve([]);
+          return;
+        }
+        resolve(Array.isArray(tabs) ? tabs : []);
+      });
+    });
+
+  const tabUpdate = (tabId, props) =>
+    new Promise((resolve, reject) => {
+      chrome.tabs.update(tabId, props, (tab) => {
+        if (chrome.runtime.lastError) {
+          reject(new Error(chrome.runtime.lastError.message || "tab-update-failed"));
+          return;
+        }
+        resolve(tab || null);
+      });
+    });
+
+  const tabCreate = (props) =>
+    new Promise((resolve, reject) => {
+      chrome.tabs.create(props, (tab) => {
+        if (chrome.runtime.lastError || !tab || !tab.id) {
+          reject(new Error((chrome.runtime.lastError && chrome.runtime.lastError.message) || "tab-create-failed"));
+          return;
+        }
+        resolve(tab);
+      });
+    });
+
+  const sendMessageToTab = (tabId, payload) =>
+    new Promise((resolve) => {
+      chrome.tabs.sendMessage(tabId, payload, (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, error: chrome.runtime.lastError.message || "tab-message-failed" });
+          return;
+        }
+        resolve(response || { ok: false, error: "tab-no-response" });
+      });
+    });
+
+  const ensureImagineTargetTab = async () => {
+    const tabs = await tabsQuery({ url: ["https://grok.com/imagine*", "https://grok.com/imagine/favorites*"] });
+    let target = tabs.find((tab) => tab.active && tab.windowId === chrome.windows.WINDOW_ID_CURRENT) || tabs[0] || null;
+    if (!target || !target.id) {
+      target = await tabCreate({ url: IMAGINE_URL, active: true });
+    } else {
+      const url = String(target.url || "");
+      const needsImagine = !/\/imagine(?:[/?#]|$)/i.test(url) || /\/imagine\/favorites/i.test(url);
+      if (needsImagine) {
+        target = await tabUpdate(target.id, { url: IMAGINE_URL, active: true });
+      } else {
+        target = await tabUpdate(target.id, { active: true });
+      }
+    }
+    await waitForTabComplete(target.id, 45000);
+    return target;
   };
 
   const NATIVE_REGEN_DIAG_ENABLED = false;
@@ -1490,6 +1553,41 @@
         }
         sendResponse({ ok: true, response });
       });
+      return true;
+    }
+
+    if (message && message.action === "grokViewerSequenceGenerate") {
+      (async () => {
+        try {
+          const payload = message && message.payload ? message.payload : null;
+          if (!payload || !payload.imageDataUrl) {
+            sendResponse({ ok: false, error: "missing-sequence-payload" });
+            return;
+          }
+          const targetTab = await ensureImagineTargetTab();
+          let lastResult = { ok: false, error: "sequence-message-failed" };
+          for (let attempt = 0; attempt < 3; attempt += 1) {
+            if (attempt > 0) {
+              await new Promise((resolve) => setTimeout(resolve, 320));
+            }
+            const result = await sendMessageToTab(targetTab.id, {
+              action: "grokViewerSequenceGenerateFromImage",
+              payload
+            });
+            lastResult = result;
+            if (result && result.ok) break;
+            const errText = String((result && result.error) || "").toLowerCase();
+            if (errText.includes("receiving end does not exist")) {
+              await waitForTabComplete(targetTab.id, 10000).catch(() => {});
+              continue;
+            }
+            if (!errText.includes("tab-no-response")) break;
+          }
+          sendResponse(lastResult && lastResult.ok ? { ok: true } : { ok: false, error: (lastResult && lastResult.error) || "sequence-failed" });
+        } catch (error) {
+          sendResponse({ ok: false, error: (error && error.message) || "sequence-failed" });
+        }
+      })();
       return true;
     }
 

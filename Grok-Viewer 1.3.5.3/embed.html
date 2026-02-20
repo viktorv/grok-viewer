@@ -1647,6 +1647,102 @@
       box-shadow: none;
     }
 
+    #sequenceVideoBtn {
+      border-color: rgba(110, 231, 255, 0.52);
+      background: rgba(110, 231, 255, 0.16);
+      color: #dbf7ff;
+      padding: 7px 11px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      line-height: 1;
+      min-height: 30px;
+    }
+
+    #sequenceVideoBtn:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    #sequenceVideoBtn:hover {
+      border-color: rgba(110, 231, 255, 0.85);
+      background: rgba(110, 231, 255, 0.23);
+    }
+
+    #sequenceVideoBtn svg {
+      width: 15px;
+      height: 15px;
+      display: block;
+    }
+
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .sequence-preview-wrap {
+      border: 1px solid rgba(255, 255, 255, 0.16);
+      border-radius: 14px;
+      background: rgba(12, 14, 20, 0.62);
+      padding: 10px;
+      margin-bottom: 12px;
+    }
+
+    #sequencePreviewImage {
+      width: 100%;
+      max-height: 260px;
+      object-fit: contain;
+      border-radius: 10px;
+      display: block;
+      background: rgba(0, 0, 0, 0.35);
+    }
+
+    #sequencePromptInput {
+      width: 100%;
+      min-height: 90px;
+      resize: vertical;
+      border-radius: 12px;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(10, 12, 17, 0.9);
+      color: var(--text);
+      padding: 10px 12px;
+      font: inherit;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    #sequencePromptInput:focus {
+      outline: none;
+      border-color: rgba(110, 231, 255, 0.66);
+      box-shadow: 0 0 0 2px rgba(110, 231, 255, 0.2);
+    }
+
+    .sequence-help {
+      margin: 0 0 10px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .sequence-actions {
+      justify-content: flex-end;
+      gap: 8px;
+    }
+
+    .sequence-generate {
+      border-color: rgba(34, 197, 94, 0.68);
+      background: rgba(34, 197, 94, 0.2);
+      color: #ecfdf5;
+    }
+
     @keyframes regenBorderShift {
       0% {
         background-position: 0% 50%;
@@ -2889,6 +2985,14 @@
             <button id="regenBtn" class="ghost" type="button" aria-label="Regenerate video" data-tooltip="Generate an alternative video from this prompt">
               <img src="images/regen.svg" alt="Regenerate video" />
             </button>
+            <button id="sequenceVideoBtn" class="ghost" type="button" aria-label="Sequence video" data-tooltip="Use last frame as next seed">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <rect x="3" y="4" width="13" height="16" rx="2"></rect>
+                <path d="M16 10h5"></path>
+                <path d="M18 8l3 2-3 2"></path>
+              </svg>
+              <span class="sr-only">Sequence video</span>
+            </button>
             <button id="downloadGroupBtn" class="ghost" type="button" aria-label="Download compilation" data-tooltip="Download only this compilation">
               <img src="images/compilation.svg" alt="Download compilation" />
             </button>
@@ -3057,6 +3161,26 @@
       <div class="gv-modal-footer duplicate-actions">
         <button id="promptChoiceCopyBtn" class="btn danger" type="button">No, I want to copy a prompt</button>
         <button id="promptChoiceDownloadBtn" class="btn" type="button">Yes, sure</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="sequenceModal" class="gv-modal" aria-hidden="true">
+    <div class="gv-modal-card" role="dialog" aria-modal="true">
+      <div class="gv-modal-header">
+        <h2>Sequence video</h2>
+        <button id="sequenceClose" class="gv-modal-close" type="button" aria-label="Close">×</button>
+      </div>
+      <div class="gv-modal-body">
+        <p class="sequence-help">The last frame becomes your next seed image. Add a prompt to guide the next shot, or leave it empty to continue the motion naturally.</p>
+        <div class="sequence-preview-wrap">
+          <img id="sequencePreviewImage" alt="Last frame preview" />
+        </div>
+        <textarea id="sequencePromptInput" placeholder="Optional prompt for the next generation"></textarea>
+      </div>
+      <div class="gv-modal-footer sequence-actions">
+        <button id="sequenceCancelBtn" class="footer-btn" type="button">Cancel</button>
+        <button id="sequenceGenerateBtn" class="footer-btn sequence-generate" type="button" title="Open Imagine, upload this frame, and start generation">Generate</button>
       </div>
     </div>
   </div>
